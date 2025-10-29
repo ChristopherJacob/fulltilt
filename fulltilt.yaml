@@ -1,0 +1,355 @@
+## FullTilt - Smart Leveling System for Mobile Smart Homes
+## Forked from Tilty by SmartyVan — adapted for M5Stack Core1
+
+substitutions:
+  devicename: fulltilt
+  upper_devicename: FullTilt
+
+globals:
+  - id: level_tolerance
+    type: float
+    restore_value: no
+    initial_value: '1.5'
+
+  - id: led_state
+    type: int
+    restore_value: no
+    initial_value: '0'   # 0=off, 1=red, 2=green (test cycle)
+
+esphome:
+  name: fulltilt
+  friendly_name: "Full Tilt"
+  platformio_options:
+    upload_speed: 460800
+  on_boot:
+    priority: -10
+    then:
+      - script.execute: keep_screen_on
+
+esp32:
+  board: m5stack-core-esp32
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: $devicename Fallback Hotspot
+    password: !secret wifi_password
+
+mdns:
+captive_portal:
+
+web_server:
+  port: 80
+  version: 3
+
+logger:
+  level: DEBUG
+  logs:
+    mpu6886: WARN
+    display: ERROR
+    sensor: WARN
+    binary_sensor: WARN
+
+api:
+
+ota:
+  - platform: esphome
+    password: ota
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+
+i2c:
+  sda: 21
+  scl: 22
+  scan: true
+
+# ------------------------------------------------------------
+# Backlight (GPIO32)
+# ------------------------------------------------------------
+switch:
+  - platform: gpio
+    id: lcd_backlight
+    name: "LCD Backlight"
+    pin: 32
+    restore_mode: ALWAYS_OFF
+
+# ------------------------------------------------------------
+# Side LED is a WS2812 (NeoPixel) on GPIO15
+# ------------------------------------------------------------
+light:
+  - platform: neopixelbus
+    id: side_led
+    name: "Side LED"
+    pin: 15
+    num_leds: 1
+    type: GRB
+    variant: WS2812
+    method: ESP32_RMT_1
+    default_transition_length: 0s
+
+# ------------------------------------------------------------
+# Fonts
+# ------------------------------------------------------------
+font:
+  - id: font_title
+    file: "gfonts://Roboto Condensed"
+    size: 28
+  - id: font_val
+    file: "gfonts://Roboto Mono"
+    size: 36
+  - id: font_small
+    file: "gfonts://Roboto"
+    size: 16
+
+# ------------------------------------------------------------
+# Display (M5STACK = ILI9342C mapping)
+# ------------------------------------------------------------
+display:
+  - platform: ili9xxx
+    model: M5STACK
+    id: lcd
+    cs_pin: 14
+    dc_pin: 27
+    reset_pin: 33
+    invert_colors: true
+    data_rate: 4MHz
+    pixel_mode: 16bit
+    color_palette: 8BIT
+    auto_clear_enabled: false
+    update_interval: 500ms
+    transform:
+      mirror_x: false     # fixes left/right mirroring
+      mirror_y: False    # keep right-side-up
+      swap_xy: false
+    lambda: |-
+      if (!id(lcd_backlight).state) return;
+
+      // ----- Define colors -----
+      Color gray(128, 128, 128);
+      Color yellow(255, 255, 0);
+      Color green(0, 255, 0);
+      Color white(255, 255, 255);
+      Color black(0, 0, 0);
+
+      // ----- Clear screen -----
+      it.fill(black);
+
+      // ----- Title -----
+      it.printf(160, 22, id(font_title), TextAlign::CENTER, "Full Tilt");
+      it.line(20, 42, 300, 42, white);
+
+      // ----- Numeric readouts -----
+      it.printf(160, 80, id(font_small), TextAlign::CENTER, "Pitch: %.1f°", id(pitch_deg).state);
+      it.printf(160, 100, id(font_small), TextAlign::CENTER, "Roll:  %.1f°", id(roll_deg).state);
+
+      // ----- Geometry setup -----
+      const float MAX_ANGLE = 15.0f;  // degrees for full bubble travel
+      const int Cx = 160;
+      const int Cy = 170;
+      const int R_outer = 50;
+      const int R_inner = 5;
+
+      // ----- Outer circle -----
+      it.circle(Cx, Cy, R_outer, white);
+      it.line(Cx - R_outer, Cy, Cx + R_outer, Cy, gray);
+      it.line(Cx, Cy - R_outer, Cx, Cy + R_outer, gray);
+
+      // Tolerance ring (yellow)
+      int tol_px = int((id(level_tolerance) / MAX_ANGLE) * R_outer);
+      it.circle(Cx, Cy, tol_px, yellow);
+
+      // ----- Pitch / Roll normalization -----
+      float roll = id(roll_deg).state;
+      float pitch = id(pitch_deg).state;
+      if (roll > MAX_ANGLE) roll = MAX_ANGLE;
+      if (roll < -MAX_ANGLE) roll = -MAX_ANGLE;
+      if (pitch > MAX_ANGLE) pitch = MAX_ANGLE;
+      if (pitch < -MAX_ANGLE) pitch = -MAX_ANGLE;
+
+      // Bubble position within main circle
+      int bx = Cx + int((roll / MAX_ANGLE) * (R_outer - R_inner));
+      int by = Cy - int((pitch / MAX_ANGLE) * (R_outer - R_inner));
+      it.filled_circle(bx, by, R_inner + 1, green);
+
+      // ----- Horizontal spirit bar -----
+      const int HB_y = 235;
+      const int HB_w = 200;
+      const int HB_h = 16;
+      const int HB_x0 = Cx - HB_w / 2;
+      const int HB_x1 = Cx + HB_w / 2;
+      const int HB_y0 = HB_y - HB_h / 2;
+      const int HB_y1 = HB_y + HB_h / 2;
+      const int HB_radius = 6;
+
+      // Tube outline
+      it.rectangle(HB_x0, HB_y0, HB_x1, HB_y1, white);
+      it.line(HB_x0, HB_y, HB_x1, HB_y, gray);
+
+      // Bubble within bar (moves with roll)
+      float roll_ratio = roll / MAX_ANGLE;
+      int hx = Cx + int(roll_ratio * (HB_w / 2 - R_inner - 4));
+      it.filled_circle(hx, HB_y, R_inner, green);
+
+      // ----- Vertical spirit bar -----
+      const int VB_x = 295;
+      const int VB_h = 150;
+      const int VB_w = 16;
+      const int VB_y0 = Cy - VB_h / 2;
+      const int VB_y1 = Cy + VB_h / 2;
+
+      // Tube outline
+      it.rectangle(VB_x - VB_w / 2, VB_y0, VB_x + VB_w / 2, VB_y1, white);
+      it.line(VB_x, VB_y0, VB_x, VB_y1, gray);
+
+      // Bubble within bar (moves with pitch)
+      float pitch_ratio = pitch / MAX_ANGLE;
+      int vy = Cy - int(pitch_ratio * (VB_h / 2 - R_inner - 4));
+      it.filled_circle(VB_x, vy, R_inner, green);
+
+      // ----- Status and LED -----
+      bool level_ok = fabs(id(pitch_deg).state) < id(level_tolerance) &&
+                      fabs(id(roll_deg).state)  < id(level_tolerance);
+
+      it.printf(160, 305, id(font_title), TextAlign::CENTER,
+                level_ok ? "LEVEL OK" : "OUT OF LEVEL");
+
+      // Side LED: green if level, red if not
+      {
+        auto call = id(side_led).turn_on();
+        if (level_ok) call.set_rgb(0.0f, 1.0f, 0.0f);
+        else call.set_rgb(1.0f, 0.0f, 0.0f);
+        call.set_brightness(1.0f);
+        call.perform();
+      }
+
+
+
+# ------------------------------------------------------------
+# IMU (MPU6886)
+# ------------------------------------------------------------
+sensor:
+  - platform: mpu6886
+    update_interval: 100ms
+    accel_x:
+      id: ax
+      filters:
+        - median:
+            window_size: 5
+            send_every: 1
+      internal: true
+    accel_y:
+      id: ay
+      filters:
+        - median:
+            window_size: 5
+            send_every: 1
+      internal: true
+    accel_z:
+      id: az
+      filters:
+        - median:
+            window_size: 5
+            send_every: 1
+      internal: true
+
+  - platform: template
+    id: pitch_deg
+    name: "Pitch"
+    unit_of_measurement: "°"
+    icon: "mdi:angle-acute"
+    update_interval: 200ms
+    accuracy_decimals: 1
+    lambda: |-
+      const float x = id(ax).state;
+      const float y = id(ay).state;
+      const float z = id(az).state;
+      return atan2f(x, sqrtf(y*y + z*z)) * 57.2957795f;
+
+  - platform: template
+    id: roll_deg
+    name: "Roll"
+    unit_of_measurement: "°"
+    icon: "mdi:angle-acute"
+    update_interval: 200ms
+    accuracy_decimals: 1
+    lambda: |-
+      const float y = id(ay).state;
+      const float z = id(az).state;
+      return atan2f(y, z) * 57.2957795f;
+
+# ------------------------------------------------------------
+# Button logic (A/B/C)
+# ------------------------------------------------------------
+binary_sensor:
+  - platform: gpio
+    id: btn_a
+    pin:
+      number: 39
+      inverted: true
+    name: "Button A"
+    on_multi_click:
+      - timing:
+          - on for 50ms to 1s
+        then:
+          - script.execute: keep_screen_on
+      - timing:
+          - on for 2s to 5s
+        then:
+          - script.execute: cycle_leds
+
+  - platform: gpio
+    id: btn_b
+    pin:
+      number: 38
+      inverted: true
+    name: "Button B"
+    on_press:
+      - script.execute: keep_screen_on
+
+  - platform: gpio
+    id: btn_c
+    pin:
+      number: 37
+      inverted: true
+    name: "Button C"
+    on_press:
+      - script.execute: keep_screen_on
+
+# ------------------------------------------------------------
+# Scripts
+# ------------------------------------------------------------
+script:
+  - id: keep_screen_on
+    mode: restart
+    then:
+      - switch.turn_on: lcd_backlight
+      - delay: 30s
+      - switch.turn_off: lcd_backlight
+
+  # Test LED cycle script (uses the NeoPixel)
+  - id: cycle_leds
+    mode: restart
+    then:
+      - lambda: |-
+          id(led_state) += 1;
+          if (id(led_state) > 2) id(led_state) = 0;
+
+          auto call = id(side_led).turn_on();
+          if (id(led_state) == 0) {
+            call.set_brightness(0.0f);          // off
+            ESP_LOGI("led_test", "LED OFF");
+          } else if (id(led_state) == 1) {
+            call.set_rgb(1.0f, 0.0f, 0.0f);     // red
+            call.set_brightness(1.0f);
+            ESP_LOGI("led_test", "LED RED");
+          } else if (id(led_state) == 2) {
+            call.set_rgb(0.0f, 1.0f, 0.0f);     // green
+            call.set_brightness(1.0f);
+            ESP_LOGI("led_test", "LED GREEN");
+          }
+          call.perform();
