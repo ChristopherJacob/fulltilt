@@ -129,12 +129,12 @@ display:
     lambda: |-
       if (!id(lcd_backlight).state) return;
 
-      // ----- Define colors -----
-      Color gray(128, 128, 128);
-      Color yellow(255, 255, 0);
-      Color green(0, 255, 0);
-      Color white(255, 255, 255);
+      // ----- Colors -----
       Color black(0, 0, 0);
+      Color white(255, 255, 255);
+      Color gray(100, 100, 100);
+      Color light_gray(180, 180, 180);
+      Color yellow(255, 255, 0);
 
       // ----- Clear screen -----
       it.fill(black);
@@ -147,82 +147,104 @@ display:
       it.printf(160, 80, id(font_small), TextAlign::CENTER, "Pitch: %.1f°", id(pitch_deg).state);
       it.printf(160, 100, id(font_small), TextAlign::CENTER, "Roll:  %.1f°", id(roll_deg).state);
 
-      // ----- Geometry setup -----
-      const float MAX_ANGLE = 15.0f;  // degrees for full bubble travel
-      const int Cx = 160;
-      const int Cy = 170;
+      // ----- Geometry -----
+      const float MAX_ANGLE = 15.0f;
+      const int Cx = 160, Cy = 170;
       const int R_outer = 50;
       const int R_inner = 5;
 
-      // ----- Outer circle -----
+      // Tube rim with slight 3D
+      it.circle(Cx, Cy, R_outer + 2, gray);
       it.circle(Cx, Cy, R_outer, white);
+      it.circle(Cx, Cy, R_outer - 2, light_gray);
+
+      // Crosshairs
       it.line(Cx - R_outer, Cy, Cx + R_outer, Cy, gray);
       it.line(Cx, Cy - R_outer, Cx, Cy + R_outer, gray);
 
-      // Tolerance ring (yellow)
+      // Tolerance ring
       int tol_px = int((id(level_tolerance) / MAX_ANGLE) * R_outer);
       it.circle(Cx, Cy, tol_px, yellow);
 
-      // ----- Pitch / Roll normalization -----
-      float roll = id(roll_deg).state;
+      // ----- Angles -----
+      float roll  = id(roll_deg).state;
       float pitch = id(pitch_deg).state;
-      if (roll > MAX_ANGLE) roll = MAX_ANGLE;
+
+      // Clamp
+      if (roll >  MAX_ANGLE) roll =  MAX_ANGLE;
       if (roll < -MAX_ANGLE) roll = -MAX_ANGLE;
-      if (pitch > MAX_ANGLE) pitch = MAX_ANGLE;
+      if (pitch >  MAX_ANGLE) pitch =  MAX_ANGLE;
       if (pitch < -MAX_ANGLE) pitch = -MAX_ANGLE;
 
-      // Bubble position within main circle
-      int bx = Cx + int((roll / MAX_ANGLE) * (R_outer - R_inner));
-      int by = Cy - int((pitch / MAX_ANGLE) * (R_outer - R_inner));
-      it.filled_circle(bx, by, R_inner + 1, green);
+      // ----- Deviation & gradient (GREEN -> YELLOW -> RED)
+      float deviation = sqrtf(id(pitch_deg).state * id(pitch_deg).state +
+                              id(roll_deg).state  * id(roll_deg).state);
+      float t = deviation / id(level_tolerance);
+      if (t < 0.0f) t = 0.0f;
+      if (t > 2.0f) t = 2.0f;
 
-      // ----- Horizontal spirit bar -----
-      const int HB_y = 235;
-      const int HB_w = 200;
-      const int HB_h = 16;
-      const int HB_x0 = Cx - HB_w / 2;
-      const int HB_x1 = Cx + HB_w / 2;
-      const int HB_y0 = HB_y - HB_h / 2;
-      const int HB_y1 = HB_y + HB_h / 2;
-      const int HB_radius = 6;
+      int r, g, b = 0;
+      if (t < 1.0f) {            // 0..1 : green -> yellow
+        r = int(255 * t);
+        g = 255;
+      } else {                   // 1..2 : yellow -> red
+        r = 255;
+        g = int(255 * (2.0f - t));
+      }
+      Color bubble_core(r, g, b);
+      Color bubble_highlight(std::min(255, r + 80), std::min(255, g + 80), std::min(255, b + 80));
 
-      // Tube outline
-      it.rectangle(HB_x0, HB_y0, HB_x1, HB_y1, white);
-      it.line(HB_x0, HB_y, HB_x1, HB_y, gray);
+      // ----- Bubble position (fixed mapping)
+      // Pitch controls LEFT/RIGHT (nose up -> bubble LEFT)
+      // Roll  controls UP/DOWN   (roll left -> bubble UP)
+      int travel = R_outer - R_inner;
+      int bx = Cx - int((pitch / MAX_ANGLE) * travel);
+      int by = Cy + int((roll  / MAX_ANGLE) * travel);
 
-      // Bubble within bar (moves with roll)
-      float roll_ratio = roll / MAX_ANGLE;
-      int hx = Cx + int(roll_ratio * (HB_w / 2 - R_inner - 4));
-      it.filled_circle(hx, HB_y, R_inner, green);
+      // Draw shaded bubble
+      it.filled_circle(bx, by, R_inner + 3, gray);               // shadow ring
+      it.filled_circle(bx, by, R_inner + 2, bubble_core);        // main color
+      it.filled_circle(bx - 1, by - 1, R_inner, bubble_highlight); // highlight
 
-      // ----- Vertical spirit bar -----
-      const int VB_x = 295;
-      const int VB_h = 150;
-      const int VB_w = 16;
+      // ----- Horizontal spirit bar (ROLL indicator: left/right)
+      const int HB_y = 235, HB_w = 200, HB_h = 16;
+      const int HB_x0 = Cx - HB_w / 2, HB_y0 = HB_y - HB_h / 2;
+
+      it.filled_rectangle(HB_x0, HB_y0, HB_w, HB_h, gray);
+      it.line(HB_x0, HB_y0, HB_x0 + HB_w, HB_y0, light_gray);
+      it.line(HB_x0, HB_y0 + HB_h, HB_x0 + HB_w, HB_y0 + HB_h, black);
+      it.rectangle(HB_x0, HB_y0, HB_x0 + HB_w, HB_y0 + HB_h, white);
+
+      // Bubble moves with ROLL horizontally
+      int hx_range = (HB_w / 2 - R_inner - 4);
+      int hx = Cx + int((roll / MAX_ANGLE) * hx_range);
+      it.filled_circle(hx, HB_y, R_inner + 2, bubble_core);
+      it.filled_circle(hx - 1, HB_y - 1, R_inner, bubble_highlight);
+
+      // ----- Vertical spirit bar (PITCH indicator: up/down)
+      const int VB_x = 295, VB_h = 150, VB_w = 16;
       const int VB_y0 = Cy - VB_h / 2;
-      const int VB_y1 = Cy + VB_h / 2;
 
-      // Tube outline
-      it.rectangle(VB_x - VB_w / 2, VB_y0, VB_x + VB_w / 2, VB_y1, white);
-      it.line(VB_x, VB_y0, VB_x, VB_y1, gray);
+      it.filled_rectangle(VB_x - VB_w / 2, VB_y0, VB_w, VB_h, gray);
+      it.line(VB_x - VB_w / 2, VB_y0, VB_x + VB_w / 2, VB_y0, light_gray);
+      it.line(VB_x - VB_w / 2, VB_y0 + VB_h, VB_x + VB_w / 2, VB_y0 + VB_h, black);
+      it.rectangle(VB_x - VB_w / 2, VB_y0, VB_x + VB_w / 2, VB_y0 + VB_h, white);
 
-      // Bubble within bar (moves with pitch)
-      float pitch_ratio = pitch / MAX_ANGLE;
-      int vy = Cy - int(pitch_ratio * (VB_h / 2 - R_inner - 4));
-      it.filled_circle(VB_x, vy, R_inner, green);
+      // Bubble moves with PITCH vertically (nose up -> bubble up)
+      int vy_range = (VB_h / 2 - R_inner - 4);
+      int vy = Cy - int((pitch / MAX_ANGLE) * vy_range);
+      it.filled_circle(VB_x, vy, R_inner + 2, bubble_core);
+      it.filled_circle(VB_x - 1, vy - 1, R_inner, bubble_highlight);
 
-      // ----- Status and LED -----
+      // ----- Status + LED (LED uses same gradient; green at level) -----
       bool level_ok = fabs(id(pitch_deg).state) < id(level_tolerance) &&
                       fabs(id(roll_deg).state)  < id(level_tolerance);
-
       it.printf(160, 305, id(font_title), TextAlign::CENTER,
                 level_ok ? "LEVEL OK" : "OUT OF LEVEL");
 
-      // Side LED: green if level, red if not
       {
         auto call = id(side_led).turn_on();
-        if (level_ok) call.set_rgb(0.0f, 1.0f, 0.0f);
-        else call.set_rgb(1.0f, 0.0f, 0.0f);
+        call.set_rgb(r / 255.0f, g / 255.0f, b / 255.0f);  // green near level, red far off
         call.set_brightness(1.0f);
         call.perform();
       }
